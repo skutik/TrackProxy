@@ -12,7 +12,7 @@
                     <th>Selected<th>
                 </tr>
             </thead>
-            <tbody hx-get="/requests_table" hx-swap="beforeend" hx-trigger="every 5s" id="tableContent"></tbody>
+            <tbody hx-get="/requests_table" hx-swap="innerHTML" hx-trigger="every 1s" id="tableContent"></tbody>
         </table>
     </div>
 {{ end }}

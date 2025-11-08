@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	Lock   sync.Mutex
+	// Lock   sync.Mutex
 	RwLock sync.RWMutex
 )
 var Storage = make(RequestStorage)
@@ -74,10 +74,17 @@ type ResponseRecord struct {
 	Error       string              `json:"error"`
 }
 
+type ProxyInfo struct {
+	Host    string `json:"host"`
+	SrcAddr string `json:"srcAddr"`
+	DstAddr string `json:"dstAddr"`
+}
+
 type Request struct {
-	Id       string         `json:"id"`
-	Request  RequestRecord  `json:"request"`
-	Response ResponseRecord `json:"response"`
+	Id        string         `json:"id"`
+	Request   RequestRecord  `json:"request"`
+	Response  ResponseRecord `json:"response"`
+	ProxyInfo ProxyInfo      `json:"proxy"`
 }
 
 type UnknownRecord struct {
@@ -112,13 +119,21 @@ func NewRequest() Request {
 	return req
 }
 
+func (reqStorage RequestStorage) ClearStorage() {
+	RwLock.Lock()
+	defer RwLock.Unlock()
+	for key := range reqStorage {
+		delete(reqStorage, key)
+	}
+}
+
 func (reqStorage RequestStorage) AddRequestToStorage(req Request) error {
 	if len(req.Id) == 0 {
 		req.Id = uuid.New().String()
 	}
 
-	Lock.Lock()
-	defer Lock.Unlock()
+	RwLock.Lock()
+	defer RwLock.Unlock()
 
 	_, exists := reqStorage[req.Id]
 	if exists {
@@ -128,6 +143,22 @@ func (reqStorage RequestStorage) AddRequestToStorage(req Request) error {
 	return nil
 }
 
+func (reqStorage RequestStorage) UpdateExistingRequest(req Request) bool {
+	RwLock.Lock()
+	defer RwLock.Unlock()
+	if _, exists := reqStorage[req.Id]; !exists {
+		return false
+	}
+	reqStorage[req.Id] = req
+	return true
+}
+
+func (reqStorage RequestStorage) CreateRecordWithProxyInfo(proxyInfo ProxyInfo) Request {
+	req := NewRequest()
+	req.ProxyInfo = proxyInfo
+	reqStorage.AddRequestToStorage(req)
+	return req
+}
 func (reqStorage RequestStorage) GetRequests(filter SearchFilter) []Request {
 	requests, _ := reqStorage.GetRequestSinceId("", filter)
 	return requests
@@ -187,8 +218,8 @@ func (reqStorage RequestStorage) GetRequestSinceId(lastId string, filter SearchF
 	request := Request{}
 	i := 0
 
-	RwLock.Lock()
-	defer RwLock.Unlock()
+	RwLock.RLock()
+	defer RwLock.RUnlock()
 
 	for _, request := range reqStorage {
 		requests = append(requests, request)
@@ -225,8 +256,8 @@ func (reqStorage RequestStorage) GetRequestSinceId(lastId string, filter SearchF
 }
 
 func (reqStorage RequestStorage) GetRequestById(reqId string) (Request, error) {
-	RwLock.Lock()
-	defer RwLock.Unlock()
+	RwLock.RLock()
+	defer RwLock.RUnlock()
 	req, exists := reqStorage[reqId]
 	if !exists {
 		return Request{}, fmt.Errorf("request with ID %s not found", reqId)

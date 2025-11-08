@@ -40,6 +40,11 @@ func GetCurl(c *gin.Context) {
 	c.JSON(http.StatusOK, request)
 }
 
+func Clear(c *gin.Context) {
+	requests_storage.Storage.ClearStorage()
+	c.JSON(http.StatusOK, nil)
+}
+
 func Ping(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"ping": "pong",

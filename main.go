@@ -2,9 +2,10 @@ package main
 
 import (
 	"log"
+	"net"
 	"track_proxy/api_handler"
-	"track_proxy/cert_handler"
 	"track_proxy/connection_handler"
+	"track_proxy/tls_utils"
 	"track_proxy/web_app"
 
 	"github.com/gin-contrib/cors"
@@ -13,22 +14,30 @@ import (
 )
 
 func listenProxy(addr string) {
-	cert := cert_handler.LoadCert("server.crt", "server.key")
-	tlsConfig := &tls.Config{
-		ServerName: "localhost",
-		NextProtos: []string{
-			"h2", "h1/1",
-		},
-		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: true,
-	}
-
-	certFile, certKey, err := cert_handler.LoadX509KeyPair("RootCA.pem", "RootCA.key")
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("Error loading cert %v", err)
-
+		log.Fatalln("Error during creation of TCP listener ", err)
 	}
-	listener, err := tls.Listen("tcp", addr, tlsConfig)
+	defer listener.Close()
+
+	log.Println("Starting proxy server on addr", addr)
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Error accepting connection %v \n", err)
+			conn.Close()
+		}
+
+		log.Printf("Processing connection %v \n", conn)
+		go func() {
+			success := connection_handler.HandleConnection(conn)
+			log.Printf("Connecion %v success status: %v \n", conn.RemoteAddr().String(), success)
+		}()
+	}
+}
+
+func listenProxyTls(addr string) {
+	listener, err := tls.Listen("tcp", addr, tls_utils.TLSConfig)
 	if err != nil {
 		log.Fatalln("Error during creation of TCP listener ", err)
 	}
@@ -44,11 +53,10 @@ func listenProxy(addr string) {
 
 		log.Printf("Processing connection %v \n", conn)
 		go func() {
-			success := connection_handler.HandleConnection(conn, certFile, certKey)
+			success := connection_handler.HandleConnection(conn)
 			log.Printf("Connecion %v success status: %v \n", conn.RemoteAddr().String(), success)
 		}()
 	}
-
 }
 
 func listenApiServer(addr string) {
@@ -66,6 +74,7 @@ func listenApiServer(addr string) {
 	router.GET("/requests", api_handler.GetRequests)
 	router.GET("/request/:requestId", api_handler.GetRequestById)
 	router.GET("/curl/:requestId", api_handler.GetCurl)
+	router.DELETE("/clear", api_handler.Clear)
 
 	log.Println("Starting gin server on addr", addr)
 	if err := router.Run(addr); err != nil {
@@ -122,8 +131,9 @@ func listenWebApp(addr string) {
 
 func main() {
 	go listenProxy(":8000")
-	go listenApiServer(":8001")
-	go listenWebApp(":8002")
+	go listenProxyTls(":8001")
+	go listenApiServer(":8002")
+	go listenWebApp(":8003")
 
 	select {}
 }

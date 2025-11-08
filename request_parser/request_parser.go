@@ -17,7 +17,7 @@ func splitLines(buffer *bytes.Buffer) ([]string, error) {
 		return []string{}, fmt.Errorf("unexpected lines count %d", linesCount)
 	}
 	description := strings.Split(lines[0], " ")
-	if len(description) != 3 {
+	if len(description) < 3 {
 		return []string{}, fmt.Errorf("unexpected description format '%s'", description)
 	}
 	return lines, nil
@@ -27,6 +27,8 @@ func stringDataToRecord(lines []string) *requests_storage.UnknownRecord {
 	rec := &requests_storage.UnknownRecord{}
 	headersEnded := false
 	headers := make(map[string][]string)
+	var bodyLines []string
+
 	for _, line := range lines {
 		if len(line) == 0 {
 			headersEnded = true
@@ -51,9 +53,16 @@ func stringDataToRecord(lines []string) *requests_storage.UnknownRecord {
 				headers[headerName] = append(headers[headerName], headerValue)
 			}
 		} else {
-			rec.Body = []byte(line)
+			// Accumulate all body lines
+			bodyLines = append(bodyLines, line)
 		}
 	}
+
+	// Join all body lines with newlines
+	if len(bodyLines) > 0 {
+		rec.Body = []byte(strings.Join(bodyLines, "\r\n"))
+	}
+
 	rec.Headers = headers
 	return rec
 }

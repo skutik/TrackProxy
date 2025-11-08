@@ -2,8 +2,9 @@ package connection_handler
 
 import (
 	"bufio"
-	"crypto/x509"
+	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -11,20 +12,26 @@ import (
 	"sync"
 	"time"
 	"track_proxy/cert_handler"
-	"track_proxy/client_hello"
 	"track_proxy/requests_storage"
+	"track_proxy/tls_utils"
 
 	tls "github.com/refraction-networking/utls"
 )
 
 const BufferSize = 1024 * 4
-const OK_RESPONSE = "HTTP/1.1 200 OK\r\n\r\n"
+
+const OK_RESPONSE = "HTTP/1.1 200 Connection Established\r\n\r\n"
 const HOST_TIMEOUT = time.Second * 30
 const DEFAULT_PROTO = "http/1.1"
 
 type ClientHelloUtlsConn struct {
 	*tls.Conn
 	ClientHelloRaw []byte
+}
+
+func Server(conn net.Conn, config *tls.Config) *ClientHelloUtlsConn {
+	tlsConn := tls.Server(conn, config)
+	return &ClientHelloUtlsConn{Conn: tlsConn}
 }
 
 func (c *ClientHelloUtlsConn) Read(b []byte) (int, error) {
@@ -48,8 +55,21 @@ func parseHost(data []byte) string {
 	return parts[1]
 }
 
-func handleConnectRequest(conn net.Conn, cert *x509.Certificate, key any, req *http.Request, errChan chan error) {
+func handleConnectRequest(conn net.Conn, req *http.Request, errChan chan error) {
 	host := req.Host
+	logger := log.New(
+		log.Writer(),
+		fmt.Sprintf("[handleConnectRequest - %s] ", host),
+		log.Flags(),
+	)
+	logger.Println("connection to host", host)
+	proxyInfo := requests_storage.ProxyInfo{
+		Host:    host,
+		SrcAddr: conn.RemoteAddr().String(),
+		DstAddr: conn.LocalAddr().String(),
+	}
+	request := requests_storage.Storage.CreateRecordWithProxyInfo(proxyInfo)
+
 	var hostDomain string
 	var err error
 	if strings.Contains(host, ":") {
@@ -61,7 +81,9 @@ func handleConnectRequest(conn net.Conn, cert *x509.Certificate, key any, req *h
 	} else {
 		hostDomain = host
 	}
-	pemCert, pemKey := cert_handler.CreateCert(hostDomain, cert, key, 240)
+	pemCert, pemKey := cert_handler.CreateCert(
+		hostDomain, tls_utils.ServerCert.File, tls_utils.ServerCert.Key, 240,
+	)
 
 	tlsCert, err := tls.X509KeyPair(pemCert, pemKey)
 	if err != nil {
@@ -78,13 +100,24 @@ func handleConnectRequest(conn net.Conn, cert *x509.Certificate, key any, req *h
 	hostConn, err := tls.Dial("tcp", host, &tls.Config{
 		NextProtos: []string{"h2", "http/1.1"},
 	})
+	if err != nil {
+		logger.Printf("Error connecting to %s: %v", host, err)
+		errChan <- err
+		return
+	}
+
 	serverProto := hostConn.ConnectionState().NegotiatedProtocol
 	if serverProto == "" {
 		serverProto = DEFAULT_PROTO
 	}
 
-	log.Println("server proto:", serverProto)
-	tlsConn := &ClientHelloUtlsConn{Conn: conn.(*tls.Conn)}
+	logger.Printf("server proto: %s, host: %s", serverProto, host)
+	// var tlsConn *ClientHelloUtlsConn
+	// tlsConn := &ClientHelloUtlsConn{Conn: conn.(*tls.Conn)}
+
+	// newConn := tls_utils.UpgradeClientConn(conn, tlsCert, serverProto)
+
+	// var tlsServerConn *tls.Conn
 	serverTlsConfig := &tls.Config{
 		PreferServerCipherSuites: true,
 		CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
@@ -94,10 +127,10 @@ func handleConnectRequest(conn net.Conn, cert *x509.Certificate, key any, req *h
 		InsecureSkipVerify:       true,
 	}
 
-	tlsServerConn := tls.Server(tlsConn, serverTlsConfig)
+	tlsServerConn := tls.Server(conn, serverTlsConfig)
 	defer func() {
 		tlsServerConn.Close()
-		log.Println("closing TLS server conn")
+		logger.Println("closing TLS server conn")
 	}()
 
 	if err != nil {
@@ -106,26 +139,19 @@ func handleConnectRequest(conn net.Conn, cert *x509.Certificate, key any, req *h
 	}
 
 	defer func() {
-		log.Println("Closing connection to host", host)
+		logger.Println("Closing connection to host", host)
 		defer hostConn.Close()
 	}()
 
-	log.Println("Starting pipe")
+	logger.Println("Starting pipe")
 	requestChan := make(chan requests_storage.Request)
 
 	var wg sync.WaitGroup
 
 	wg.Add(1)
 	go PipeHttp(tlsServerConn, hostConn, &wg, requestChan)
-	request := <-requestChan
+	request = <-requestChan
 
-	tlsClientHelloWithoutHeaders := tlsConn.ClientHelloRaw[5:]
-	clientHelloData, err := client_hello.UnmarshallClientHello(tlsClientHelloWithoutHeaders)
-	if err != nil {
-		log.Println("error parsing client hello data:", err)
-	} else {
-		request.Request.ClientHello = *clientHelloData
-	}
 	err = requests_storage.Storage.AddRequestToStorage(request)
 	if err != nil {
 		log.Println("error when adding request to storage")
@@ -154,24 +180,41 @@ func handlerDirectRequest(conn net.Conn, req *http.Request, errChan chan error) 
 	errChan <- nil
 }
 
-func HandleConnection(conn net.Conn, cert *x509.Certificate, key any) bool {
+func HandleConnection(conn net.Conn) bool {
 	defer func() {
 		conn.Close()
-		log.Println("Closing client connection")
+		log.Println("Closing client connection", conn)
 	}()
 
-	connReader := bufio.NewReader(conn)
+	// Set read deadline to prevent hanging
+	if err := conn.SetReadDeadline(time.Now().Add(HOST_TIMEOUT)); err != nil {
+		log.Printf("Error setting read deadline: %v", err)
+		return false
+	}
+
+	var cpBuffer bytes.Buffer
+	teeReader := io.TeeReader(conn, &cpBuffer)
+	connReader := bufio.NewReader(teeReader)
 	req, err := http.ReadRequest(connReader)
 	if err != nil {
 		fmt.Println("Error when reading request", err)
 		return false
 	}
 
+	log.Printf("Request: %s %s (conn: %v, %s)", req.Method, req.URL, conn, conn.RemoteAddr())
+
 	errChan := make(chan error)
 	if req.Method == http.MethodConnect {
-		go handleConnectRequest(conn, cert, key, req, errChan)
+		go handleConnectRequest(conn, req, errChan)
 	} else {
+		log.Printf("Direct request method: %s", req.Method)
 		go handlerDirectRequest(conn, req, errChan)
+	}
+
+	// Reset read deadline for subsequent operations
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		log.Printf("Error clearing read deadline: %v", err)
+		return false
 	}
 
 	err = <-errChan

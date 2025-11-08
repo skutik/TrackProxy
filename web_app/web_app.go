@@ -47,7 +47,7 @@ func HandleIndex(c *gin.Context) {
 }
 
 func HandleRequestsTable(c *gin.Context) {
-	requests, lastId := requests_storage.Storage.GetRequestSinceId(lastFetchedId, activeFilter)
+	requests, lastId := requests_storage.Storage.GetRequestSinceId("", activeFilter)
 	lastFetchedId = lastId
 	if len(requests) == 0 {
 		c.Status(http.StatusNoContent)
